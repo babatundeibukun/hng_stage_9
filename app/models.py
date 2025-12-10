@@ -60,3 +60,15 @@ class Wallet(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
+
+class Transfer(Base):
+    __tablename__ = "transfers"
+    
+    id = Column(String, primary_key=True, index=True)
+    sender_id = Column(String, nullable=False, index=True)
+    recipient_id = Column(String, nullable=False, index=True)
+    amount = Column(Integer, nullable=False)  # Amount in kobo
+    status = Column(SQLEnum(TransactionStatus), default=TransactionStatus.SUCCESS, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+

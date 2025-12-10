@@ -10,7 +10,7 @@ from typing import Optional
 from datetime import datetime, timezone
 
 from app.database import get_db
-from app.models import Transaction, TransactionStatus, User, Wallet
+from app.models import Transaction, TransactionStatus, User, Wallet, Transfer
 from app.schemas import (
     PaymentInitiateRequest,
     PaymentInitiateResponse,
@@ -18,7 +18,8 @@ from app.schemas import (
     WebhookResponse,
     WalletBalanceResponse,
     WalletTransferRequest,
-    WalletTransferResponse
+    WalletTransferResponse,
+    TransactionHistoryItem
 )
 from app.config import settings
 from app.auth_utils import require_permission
@@ -378,6 +379,16 @@ async def wallet_transfer(
         sender_wallet.balance -= transfer_request.amount
         recipient_wallet.balance += transfer_request.amount
         
+        # Record transfer
+        transfer = Transfer(
+            id=str(uuid.uuid4()),
+            sender_id=current_user.id,
+            recipient_id=transfer_request.wallet_number,
+            amount=transfer_request.amount,
+            status=TransactionStatus.SUCCESS
+        )
+        db.add(transfer)
+        
         await db.commit()
         
         return WalletTransferResponse(
@@ -393,4 +404,69 @@ async def wallet_transfer(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal error: {str(e)}"
         )
+
+
+@router.get("/transactions", response_model=list[TransactionHistoryItem])
+async def get_transaction_history(
+    current_user: User = Depends(require_permission("read")),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get transaction history for authenticated user.
+    
+    Authentication:
+    - JWT: Send Bearer token in Authorization header
+    - API Key: Send API key in X-API-Key header (requires 'read' permission)
+    
+    Returns list of deposits and transfers.
+    """
+    try:
+        history = []
+        
+        # Get deposits (successful transactions)
+        deposits_result = await db.execute(
+            select(Transaction).where(
+                Transaction.user_id == current_user.id,
+                Transaction.status == TransactionStatus.SUCCESS
+            ).order_by(Transaction.created_at.desc())
+        )
+        deposits = deposits_result.scalars().all()
+        
+        for deposit in deposits:
+            history.append(TransactionHistoryItem(
+                type="deposit",
+                amount=deposit.amount,
+                status=deposit.status.value,
+                timestamp=deposit.paid_at or deposit.created_at
+            ))
+        
+        # Get sent transfers
+        sent_transfers_result = await db.execute(
+            select(Transfer).where(
+                Transfer.sender_id == current_user.id
+            ).order_by(Transfer.created_at.desc())
+        )
+        sent_transfers = sent_transfers_result.scalars().all()
+        
+        for transfer in sent_transfers:
+            history.append(TransactionHistoryItem(
+                type="transfer",
+                amount=transfer.amount,
+                status=transfer.status.value,
+                timestamp=transfer.created_at
+            ))
+        
+        # Sort by timestamp descending
+        history.sort(key=lambda x: x.timestamp, reverse=True)
+        
+        return history
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal error: {str(e)}"
+        )
+
 

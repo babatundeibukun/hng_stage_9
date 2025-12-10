@@ -98,3 +98,11 @@ class WalletTransferResponse(BaseModel):
     status: str
     message: str
 
+
+class TransactionHistoryItem(BaseModel):
+    type: str = Field(..., description="Transaction type: deposit or transfer")
+    amount: int = Field(..., description="Amount in kobo")
+    status: str = Field(..., description="Transaction status: success, pending, failed")
+    timestamp: datetime = Field(..., description="Transaction timestamp")
+
+
