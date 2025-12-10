@@ -2,13 +2,15 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import httpx
-import hashlib
+import uuid
 import hmac
-from datetime import datetime
+import hashlib
+import json
 from typing import Optional
+from datetime import datetime, timezone
 
 from app.database import get_db
-from app.models import Transaction, TransactionStatus, User
+from app.models import Transaction, TransactionStatus, User, Wallet
 from app.schemas import (
     PaymentInitiateRequest,
     PaymentInitiateResponse,
@@ -16,25 +18,31 @@ from app.schemas import (
     WebhookResponse
 )
 from app.config import settings
-from app.auth_utils import get_current_user
+from app.auth_utils import require_permission
 
-router = APIRouter(prefix="/payments", tags=["Payments"])
+router = APIRouter(prefix="/wallet", tags=["Wallet"])
 
 # Paystack API URLs
 PAYSTACK_INITIALIZE_URL = "https://api.paystack.co/transaction/initialize"
-PAYSTACK_VERIFY_URL = "https://api.paystack.co/transaction/verify"
 
 
-@router.post("/paystack/initiate", response_model=PaymentInitiateResponse, status_code=status.HTTP_201_CREATED)
-async def initiate_payment(
+@router.post("/deposit", response_model=PaymentInitiateResponse, status_code=status.HTTP_201_CREATED)
+async def wallet_deposit(
     payment_request: PaymentInitiateRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("deposit")),
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Initiate a Paystack payment transaction.
-    Requires authentication. Email is taken from authenticated user.
-    Returns the payment reference and authorization URL.
+    Initiate a wallet deposit via Paystack.
+    
+    Authentication:
+    - JWT: Send Bearer token in Authorization header
+    - API Key: Send API key in X-API-Key header (requires 'deposit' permission)
+    
+    The email is automatically taken from the authenticated user.
+    Amount is in kobo (smallest currency unit).
+    
+    Returns payment reference and authorization URL for user to complete payment.
     """
     try:
         # Validate amount
@@ -45,7 +53,6 @@ async def initiate_payment(
             )
         
         # Generate unique reference
-        import uuid
         reference = f"txn_{uuid.uuid4().hex}"
         
         # Check if reference already exists (idempotency)
@@ -68,7 +75,7 @@ async def initiate_payment(
                 },
                 json={
                     "amount": payment_request.amount,
-                    "email": current_user.email,  # Get email from authenticated user
+                    "email": current_user.email,  # Email from authenticated user
                     "reference": reference,
                     "currency": "NGN"
                 }
@@ -93,7 +100,7 @@ async def initiate_payment(
             # Persist transaction in database
             transaction = Transaction(
                 reference=reference,
-                user_id=current_user.id,  # Link transaction to authenticated user
+                user_id=current_user.id,
                 amount=payment_request.amount,
                 status=TransactionStatus.PENDING,
                 authorization_url=authorization_url
@@ -124,7 +131,15 @@ async def paystack_webhook(
 ):
     """
     Webhook endpoint to receive transaction updates from Paystack.
-    Validates the signature and updates transaction status in the database.
+    
+    Security: Validates Paystack signature
+    Actions:
+    - Verify signature
+    - Find transaction by reference
+    - Update transaction status
+    - Credit wallet balance on success
+    
+    ⚠️ Only this endpoint is allowed to credit wallets.
     """
     try:
         # Get request body
@@ -151,7 +166,6 @@ async def paystack_webhook(
             )
         
         # Parse event payload
-        import json
         event = json.loads(body)
         
         event_type = event.get("event")
@@ -165,9 +179,29 @@ async def paystack_webhook(
                 result = await db.execute(select(Transaction).where(Transaction.reference == reference))
                 transaction = result.scalar_one_or_none()
                 
-                if transaction:
+                if transaction and transaction.status == TransactionStatus.PENDING:
+                    # Update transaction status
                     transaction.status = TransactionStatus.SUCCESS
-                    transaction.paid_at = datetime.utcnow()
+                    transaction.paid_at = datetime.now(timezone.utc)
+                    
+                    # Credit wallet (create wallet if doesn't exist)
+                    wallet_result = await db.execute(
+                        select(Wallet).where(Wallet.user_id == transaction.user_id)
+                    )
+                    wallet = wallet_result.scalar_one_or_none()
+                    
+                    if not wallet:
+                        # Create wallet for user
+                        wallet = Wallet(
+                            id=str(uuid.uuid4()),
+                            user_id=transaction.user_id,
+                            balance=0
+                        )
+                        db.add(wallet)
+                    
+                    # Credit wallet balance
+                    wallet.balance += transaction.amount
+                    
                     await db.commit()
         
         elif event_type == "charge.failed":
@@ -177,7 +211,7 @@ async def paystack_webhook(
                 result = await db.execute(select(Transaction).where(Transaction.reference == reference))
                 transaction = result.scalar_one_or_none()
                 
-                if transaction:
+                if transaction and transaction.status == TransactionStatus.PENDING:
                     transaction.status = TransactionStatus.FAILED
                     await db.commit()
         
@@ -192,15 +226,18 @@ async def paystack_webhook(
         )
 
 
-@router.get("/{reference}/status", response_model=TransactionStatusResponse)
-async def get_transaction_status(
+@router.get("/deposit/{reference}/status", response_model=TransactionStatusResponse)
+async def get_deposit_status(
     reference: str,
-    refresh: bool = False,
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Check transaction status by reference.
-    If refresh=true, fetches the latest status from Paystack.
+    Check deposit transaction status by reference.
+    
+    ⚠️ This endpoint does NOT credit wallets.
+    Only the webhook is allowed to credit wallets.
+    
+    Returns current transaction status from database.
     """
     try:
         # Find transaction in database
@@ -212,35 +249,6 @@ async def get_transaction_status(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Transaction not found"
             )
-        
-        # If refresh is requested, fetch from Paystack
-        if refresh:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{PAYSTACK_VERIFY_URL}/{reference}",
-                    headers={
-                        "Authorization": f"Bearer {settings.paystack_secret_key}"
-                    }
-                )
-                
-                if response.status_code == 200:
-                    paystack_data = response.json()
-                    
-                    if paystack_data.get("status"):
-                        data = paystack_data["data"]
-                        paystack_status = data.get("status")
-                        
-                        # Map Paystack status to our status
-                        if paystack_status == "success":
-                            transaction.status = TransactionStatus.SUCCESS
-                            transaction.paid_at = datetime.utcnow()
-                        elif paystack_status == "failed":
-                            transaction.status = TransactionStatus.FAILED
-                        else:
-                            transaction.status = TransactionStatus.PENDING
-                        
-                        await db.commit()
-                        await db.refresh(transaction)
         
         return TransactionStatusResponse(
             reference=transaction.reference,

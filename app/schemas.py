@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 
 
@@ -51,3 +51,34 @@ class TransactionStatusResponse(BaseModel):
 
 class WebhookResponse(BaseModel):
     status: bool
+
+
+# API Key Schemas
+class APIKeyCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100, description="Name for the API key")
+    permissions: List[str] = Field(..., min_items=1, description="List of permissions: deposit, transfer, read")
+    expiry: str = Field(..., pattern="^(1H|1D|1M|1Y)$", description="Expiry duration: 1H, 1D, 1M, 1Y")
+    
+    @field_validator('permissions')
+    @classmethod
+    def validate_permissions(cls, v):
+        allowed_permissions = {"deposit", "transfer", "read"}
+        invalid = set(v) - allowed_permissions
+        if invalid:
+            raise ValueError(f"Invalid permissions: {invalid}. Allowed: {allowed_permissions}")
+        return v
+
+
+class APIKeyCreateResponse(BaseModel):
+    api_key: str
+    expires_at: datetime
+
+
+class APIKeyRolloverRequest(BaseModel):
+    expired_key_id: str = Field(..., description="ID of the expired API key")
+    expiry: str = Field(..., pattern="^(1H|1D|1M|1Y)$", description="Expiry duration: 1H, 1D, 1M, 1Y")
+
+
+class APIKeyRolloverResponse(BaseModel):
+    api_key: str
+    expires_at: datetime

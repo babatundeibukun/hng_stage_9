@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.database import init_db
-from app.routers import auth, payments
+from app.routers import auth, api_keys, wallet
 
 
 @asynccontextmanager
@@ -15,8 +15,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="HNG Stage 8 - Google OAuth & Paystack Integration",
-    description="Backend API for Google Sign-In and Paystack Payment",
+    title="HNG Stage 9 - Wallet Service",
+    description="Backend API for Wallet Management with Google Sign-In, API Keys, and Paystack Integration",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -32,17 +32,19 @@ app.add_middleware(
 
 # Include routers
 app.include_router(auth.router)
-app.include_router(payments.router)
+app.include_router(api_keys.router)
+app.include_router(wallet.router)
 
 
 @app.get("/")
 async def root():
     return {
-        "message": "HNG Stage 8 API",
+        "message": "HNG Stage 9 - Wallet Service API",
         "endpoints": {
             "docs": "/docs",
             "google_auth": "/auth/google",
-            "payment_initiate": "/payments/paystack/initiate"
+            "api_keys": "/keys/create",
+            "wallet_deposit": "/wallet/deposit"
         }
     }
 

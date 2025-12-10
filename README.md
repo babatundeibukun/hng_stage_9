@@ -1,28 +1,33 @@
-# HNG Stage 8 - Google OAuth & Paystack Integration
+# HNG Stage 9 - Wallet Service with Paystack Integration
 
-This FastAPI application implements Google Sign-In and Paystack Payment integration with secure backend endpoints.
+This FastAPI application implements a complete wallet service with Google Sign-In authentication, API key management, Paystack deposits, and wallet-to-wallet transfers.
 
 ## Features
 
-- **Google OAuth 2.0 Authentication**: Server-side sign-in flow
-- **Paystack Payment Integration**: Initialize payments and track transaction status
-- **Webhook Support**: Real-time payment status updates from Paystack
-- **Database Persistence**: PostgreSQL database for users and transactions
+- **Google OAuth 2.0 Authentication**: Server-side sign-in flow with JWT token generation
+- **API Key Management**: Create, rollover, and manage API keys for service-to-service access
+- **Wallet System**: User wallets with balance tracking
+- **Paystack Deposits**: Initialize deposits and webhook handling
+- **Wallet Transfers**: Transfer funds between user wallets
+- **Transaction History**: Track all wallet operations
+- **Dual Authentication**: JWT (for users) and API keys (for services)
 
 ## Project Structure
 
 ```
-hng_stage_8/
+hng_stage_9/
 ├── app/
 │   ├── __init__.py
 │   ├── main.py              # FastAPI application entry point
 │   ├── config.py            # Configuration settings
 │   ├── database.py          # Database connection and session
-│   ├── models.py            # SQLAlchemy models
+│   ├── models.py            # SQLAlchemy models (User, APIKey, Transaction, Wallet)
 │   ├── schemas.py           # Pydantic schemas
+│   ├── auth_utils.py        # JWT and authentication utilities
 │   └── routers/
 │       ├── __init__.py
 │       ├── auth.py          # Google OAuth endpoints
+│       ├── api_keys.py      # API key management endpoints
 │       └── payments.py      # Paystack payment endpoints
 ├── .env                     # Environment variables (create from .env.example)
 ├── .env.example             # Example environment variables
@@ -86,7 +91,7 @@ cp .env.example .env
 Update `.env` with your actual values:
 
 ```env
-DATABASE_URL=postgresql+asyncpg://postgres:your_password@localhost:5432/hng_stage_8
+DATABASE_URL=postgresql+asyncpg://postgres:your_password@localhost:5432/hng_stage_9
 
 GOOGLE_CLIENT_ID=your_google_client_id_here
 GOOGLE_CLIENT_SECRET=your_google_client_secret_here
@@ -102,11 +107,11 @@ APP_SECRET_KEY=generate_a_random_secret_key_here
 
 ```bash
 # Create PostgreSQL database
-createdb hng_stage_8
+createdb hng_stage_9
 
 # Or using psql:
 psql -U postgres
-CREATE DATABASE hng_stage_8;
+CREATE DATABASE hng_stage_9;
 \q
 ```
 
@@ -143,20 +148,71 @@ Returns the Google OAuth consent page URL.
 ```
 GET /auth/google/callback?code=xxx
 ```
-Handles the OAuth callback and creates/updates user.
+Handles the OAuth callback, creates/updates user, and returns JWT token.
 
 **Response:**
 ```json
 {
   "user_id": "uuid",
   "email": "user@example.com",
-  "name": "John Doe"
+  "name": "John Doe",
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "token_type": "bearer"
+}
+```
+
+### API Key Management
+
+#### 3. Create API Key
+```
+POST /keys/create
+Authorization: Bearer <jwt_token>
+Content-Type: application/json
+
+{
+  "name": "wallet-service",
+  "permissions": ["deposit", "transfer", "read"],
+  "expiry": "1D"
+}
+```
+Creates a new API key with specified permissions. Maximum 5 active keys per user.
+
+**Expiry Options**: `1H` (1 hour), `1D` (1 day), `1M` (1 month), `1Y` (1 year)
+
+**Permissions**: `deposit`, `transfer`, `read`
+
+**Response (200):**
+```json
+{
+  "api_key": "sk_live_xxxxxxxxxxxxx",
+  "expires_at": "2025-12-10T12:00:00Z"
+}
+```
+
+#### 4. Rollover Expired API Key
+```
+POST /keys/rollover
+Authorization: Bearer <jwt_token>
+Content-Type: application/json
+
+{
+  "expired_key_id": "FGH2485K6KK79GKG9GKGK",
+  "expiry": "1M"
+}
+```
+Creates a new API key using the same permissions as an expired key.
+
+**Response (200):**
+```json
+{
+  "api_key": "sk_live_xxxxxxxxxxxxx",
+  "expires_at": "2026-01-09T12:00:00Z"
 }
 ```
 
 ### Payments
 
-#### 3. Initiate Payment
+#### 5. Initiate Payment
 ```
 POST /payments/paystack/initiate
 Content-Type: application/json
@@ -176,7 +232,7 @@ Initializes a Paystack transaction. Amount is in kobo (smallest currency unit).
 }
 ```
 
-#### 4. Webhook (Paystack → Your Server)
+#### 6. Webhook (Paystack → Your Server)
 ```
 POST /payments/paystack/webhook
 x-paystack-signature: signature_hash
@@ -190,7 +246,7 @@ Receives payment status updates from Paystack.
 }
 ```
 
-#### 5. Check Transaction Status
+#### 7. Check Transaction Status
 ```
 GET /payments/{reference}/status?refresh=false
 ```
@@ -208,7 +264,7 @@ Returns the current status of a transaction.
 
 ## Testing the Flow
 
-### Google Sign-In Flow
+### Google Sign-In Flow (JWT Authentication)
 
 1. **Get Auth URL**:
    ```bash
@@ -217,7 +273,44 @@ Returns the current status of a transaction.
 
 2. **Visit the URL** in browser and sign in with Google
 
-3. **Get redirected** to callback endpoint with user data
+3. **Get JWT token** from callback response
+
+4. **Use JWT** in subsequent requests:
+   ```bash
+   curl -H "Authorization: Bearer <your_jwt_token>" \
+     http://localhost:8000/keys/create
+   ```
+
+### API Key Management Flow
+
+1. **Create API Key** (requires JWT):
+   ```bash
+   curl -X POST http://localhost:8000/keys/create \
+     -H "Authorization: Bearer <jwt_token>" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "name": "my-service",
+       "permissions": ["deposit", "read"],
+       "expiry": "1D"
+     }'
+   ```
+
+2. **Use API Key** for wallet operations:
+   ```bash
+   curl -H "X-API-Key: sk_live_xxxxx" \
+     http://localhost:8000/wallet/balance
+   ```
+
+3. **Rollover Expired Key**:
+   ```bash
+   curl -X POST http://localhost:8000/keys/rollover \
+     -H "Authorization: Bearer <jwt_token>" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "expired_key_id": "key_id_here",
+       "expiry": "1M"
+     }'
+   ```
 
 ### Payment Flow
 
@@ -250,6 +343,17 @@ Returns the current status of a transaction.
 - `google_id`: Google user ID (unique)
 - `created_at`, `updated_at`: Timestamps
 
+### API Keys Table
+- `id`: UUID primary key
+- `user_id`: Foreign key to users
+- `name`: Key name/description
+- `key_hash`: SHA-256 hashed API key
+- `permissions`: JSON array of permissions
+- `expires_at`: Expiration datetime
+- `is_active`: Boolean flag
+- `created_at`: Creation timestamp
+- `revoked_at`: Revocation timestamp (nullable)
+
 ### Transactions Table
 - `id`: Auto-increment primary key
 - `reference`: Unique transaction reference
@@ -262,10 +366,14 @@ Returns the current status of a transaction.
 
 ## Security Features
 
+✅ JWT authentication with HS256 algorithm  
+✅ API key hashing (SHA-256)  
+✅ Maximum 5 active API keys per user  
+✅ API key expiration enforcement  
+✅ Permission-based access control  
 ✅ Environment variables for sensitive data  
 ✅ Webhook signature verification  
 ✅ HTTPS required for production  
-✅ Idempotency for payment initiation  
 ✅ Input validation with Pydantic  
 
 ## Error Handling
@@ -313,7 +421,7 @@ Before deploying to production:
 
 ## Step-by-Step Explanation
 
-### How Google OAuth Works
+### How Google OAuth with JWT Works
 
 1. **User Request**: User hits `/auth/google` endpoint
 2. **Redirect to Google**: Server generates OAuth URL with your client ID and redirect URI
@@ -322,7 +430,30 @@ Before deploying to production:
 5. **Token Request**: Server exchanges code for access token (server-to-server)
 6. **Fetch User Info**: Server uses access token to get user's email, name, picture from Google
 7. **Save to Database**: Create or update user record in PostgreSQL
-8. **Return User Data**: Send user information back to client
+8. **Generate JWT**: Server creates JWT token with user ID and email
+9. **Return JWT**: Send JWT token to client for subsequent requests
+
+### How API Key System Works
+
+1. **Create Key**: User (with JWT) hits `/keys/create` with name, permissions, and expiry
+2. **Validate Limit**: Server checks user has < 5 active keys
+3. **Parse Expiry**: Convert `1H/1D/1M/1Y` to actual datetime
+4. **Generate Key**: Create secure random key with `sk_live_` prefix
+5. **Hash Key**: Hash the key with SHA-256 before storing
+6. **Store in DB**: Save key_hash, permissions, expiry, user_id
+7. **Return Plain Key**: Send plain API key to user (only time they see it)
+8. **Future Requests**: User sends API key, server hashes and compares with stored hash
+9. **Rollover**: When expired, user can create new key with same permissions
+
+### How API Key Rollover Works
+
+1. **Request Rollover**: User provides expired key ID and new expiry
+2. **Verify Ownership**: Check key belongs to requesting user
+3. **Check Expiration**: Verify key is truly expired
+4. **Reuse Permissions**: Copy permissions from old key
+5. **Generate New Key**: Create new secure key with same permissions
+6. **Store New Key**: Save with new expiry datetime
+7. **Return New Key**: Send new API key to user
 
 ### How Paystack Payment Works
 
@@ -340,12 +471,17 @@ Before deploying to production:
 
 ### Security Measures
 
+- **JWT Tokens**: Signed with HS256, contain user ID and email, expire after 30 minutes
+- **API Key Storage**: Keys are hashed with SHA-256, never stored in plain text
+- **API Key Format**: `sk_live_` prefix with 32-byte random string
+- **Expiry Enforcement**: Keys checked on every request, rejected if expired
+- **Permission Control**: Each key has specific permissions (deposit, transfer, read)
+- **Rate Limiting**: Maximum 5 active keys per user
 - **Environment Variables**: All secrets stored in `.env` file, never in code
 - **Webhook Signature**: Validates incoming webhooks using HMAC-SHA512
 - **OAuth Flow**: Uses authorization code flow (not implicit)
-- **Idempotency**: Duplicate payment requests return existing transaction
 - **Input Validation**: Pydantic models validate all inputs
 
 ## License
 
-This project is for HNG Stage 8 task submission.
+This project is for HNG Stage 9 task submission.

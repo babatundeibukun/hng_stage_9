@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, DateTime, Enum as SQLEnum
+from sqlalchemy import Column, String, Integer, DateTime, Enum as SQLEnum, Boolean, JSON
 from sqlalchemy.sql import func
 from datetime import datetime
 import enum
@@ -35,3 +35,28 @@ class Transaction(Base):
     paid_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
+class APIKey(Base):
+    __tablename__ = "api_keys"
+    
+    id = Column(String, primary_key=True, index=True)
+    user_id = Column(String, nullable=False, index=True)
+    name = Column(String, nullable=False)
+    key_hash = Column(String, unique=True, nullable=False)  # Hashed API key
+    permissions = Column(JSON, nullable=False)  # Store as JSON array
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class Wallet(Base):
+    __tablename__ = "wallets"
+    
+    id = Column(String, primary_key=True, index=True)
+    user_id = Column(String, unique=True, nullable=False, index=True)
+    balance = Column(Integer, default=0, nullable=False)  # Balance in kobo
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
