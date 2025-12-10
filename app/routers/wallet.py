@@ -15,7 +15,10 @@ from app.schemas import (
     PaymentInitiateRequest,
     PaymentInitiateResponse,
     TransactionStatusResponse,
-    WebhookResponse
+    WebhookResponse,
+    WalletBalanceResponse,
+    WalletTransferRequest,
+    WalletTransferResponse
 )
 from app.config import settings
 from app.auth_utils import require_permission
@@ -171,6 +174,7 @@ async def paystack_webhook(
         event_type = event.get("event")
         data = event.get("data", {})
         
+        # Handle successful charges
         if event_type == "charge.success":
             reference = data.get("reference")
             
@@ -204,16 +208,9 @@ async def paystack_webhook(
                     
                     await db.commit()
         
-        elif event_type == "charge.failed":
-            reference = data.get("reference")
-            
-            if reference:
-                result = await db.execute(select(Transaction).where(Transaction.reference == reference))
-                transaction = result.scalar_one_or_none()
-                
-                if transaction and transaction.status == TransactionStatus.PENDING:
-                    transaction.status = TransactionStatus.FAILED
-                    await db.commit()
+        # Note: Paystack doesn't send webhooks for declined/failed transactions
+        # Failed transactions remain as "pending" in the database
+        # Use the status endpoint to check if needed
         
         return WebhookResponse(status=True)
     
@@ -264,3 +261,136 @@ async def get_deposit_status(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal error: {str(e)}"
         )
+
+
+@router.get("/balance", response_model=WalletBalanceResponse)
+async def get_wallet_balance(
+    current_user: User = Depends(require_permission("read")),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get wallet balance for authenticated user.
+    
+    Authentication:
+    - JWT: Send Bearer token in Authorization header
+    - API Key: Send API key in X-API-Key header (requires 'read' permission)
+    
+    Returns balance in kobo.
+    """
+    try:
+        # Get user's wallet
+        result = await db.execute(select(Wallet).where(Wallet.user_id == current_user.id))
+        wallet = result.scalar_one_or_none()
+        
+        if not wallet:
+            # Create wallet if doesn't exist
+            wallet = Wallet(
+                id=str(uuid.uuid4()),
+                user_id=current_user.id,
+                balance=0
+            )
+            db.add(wallet)
+            await db.commit()
+            await db.refresh(wallet)
+        
+        return WalletBalanceResponse(balance=wallet.balance)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal error: {str(e)}"
+        )
+
+
+@router.post("/transfer", response_model=WalletTransferResponse)
+async def wallet_transfer(
+    transfer_request: WalletTransferRequest,
+    current_user: User = Depends(require_permission("transfer")),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Transfer funds from your wallet to another user's wallet.
+    
+    Authentication:
+    - JWT: Send Bearer token in Authorization header
+    - API Key: Send API key in X-API-Key header (requires 'transfer' permission)
+    
+    Rules:
+    - Cannot transfer to yourself
+    - Must have sufficient balance
+    - Amount is in kobo
+    """
+    try:
+        # Validate not transferring to self
+        if transfer_request.wallet_number == current_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot transfer to your own wallet"
+            )
+        
+        # Get sender's wallet
+        sender_result = await db.execute(select(Wallet).where(Wallet.user_id == current_user.id))
+        sender_wallet = sender_result.scalar_one_or_none()
+        
+        if not sender_wallet:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Sender wallet not found. Please deposit first."
+            )
+        
+        # Check sufficient balance
+        if sender_wallet.balance < transfer_request.amount:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Insufficient balance. Available: {sender_wallet.balance} kobo"
+            )
+        
+        # Get recipient's wallet (wallet_number is the user_id)
+        recipient_result = await db.execute(
+            select(Wallet).where(Wallet.user_id == transfer_request.wallet_number)
+        )
+        recipient_wallet = recipient_result.scalar_one_or_none()
+        
+        if not recipient_wallet:
+            # Check if recipient user exists
+            user_result = await db.execute(
+                select(User).where(User.id == transfer_request.wallet_number)
+            )
+            recipient_user = user_result.scalar_one_or_none()
+            
+            if not recipient_user:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Recipient wallet not found"
+                )
+            
+            # Create wallet for recipient
+            recipient_wallet = Wallet(
+                id=str(uuid.uuid4()),
+                user_id=recipient_user.id,
+                balance=0
+            )
+            db.add(recipient_wallet)
+        
+        # Perform transfer
+        sender_wallet.balance -= transfer_request.amount
+        recipient_wallet.balance += transfer_request.amount
+        
+        await db.commit()
+        
+        return WalletTransferResponse(
+            status="success",
+            message=f"Transfer of {transfer_request.amount} kobo completed successfully"
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal error: {str(e)}"
+        )
+

@@ -82,3 +82,19 @@ class APIKeyRolloverRequest(BaseModel):
 class APIKeyRolloverResponse(BaseModel):
     api_key: str
     expires_at: datetime
+
+
+# Wallet Schemas
+class WalletBalanceResponse(BaseModel):
+    balance: int = Field(..., description="Wallet balance in kobo")
+
+
+class WalletTransferRequest(BaseModel):
+    wallet_number: str = Field(..., description="Recipient's wallet number (user_id)")
+    amount: int = Field(..., gt=0, description="Amount to transfer in kobo")
+
+
+class WalletTransferResponse(BaseModel):
+    status: str
+    message: str
+
