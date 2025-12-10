@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+    
+    def get_async_database_url(self) -> str:
+        """Convert DATABASE_URL to async driver if needed"""
+        if self.database_url.startswith("postgresql://"):
+            return self.database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return self.database_url
 
 
 settings = Settings()
